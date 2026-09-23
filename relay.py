@@ -350,7 +350,17 @@ def run_hotels():
         embeds.append(e)
     head = (f"🟢 **{free_hits} zero-spend stay(s)** — {NOW:%a %b %-d}" if free_hits else f"{NOW:%a %b %-d} — no $0 stays today; closest options below")
     if H.get("note"): head += "\n_" + H["note"] + "_"
-    post(hook("hotels"), {"username": "Hotel Credits", "avatar_url": AV_HOTEL, "content": head, "embeds": embeds[:10]})
+    # Discord caps a message at 6,000 embed chars / 10 embeds -> pack embeds into as few messages as fit
+    def esize(e): return len(e["title"]) + len(e["description"]) + len(e["footer"]["text"])
+    batch, size, first = [], 0, True
+    for e in embeds + [None]:
+        if e is None or (batch and (size + esize(e) > 5800 or len(batch) == 10)):
+            ok = post(hook("hotels"), {"username": "Hotel Credits", "avatar_url": AV_HOTEL,
+                                      **({"content": head} if first else {}), "embeds": batch})
+            log(f"hotels post {'ok' if ok else 'FAILED'} embeds={len(batch)} chars={size}")
+            if not ok: sys.exit(1)
+            batch, size, first = [], 0, False
+        if e is not None: batch.append(e); size += esize(e)
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "deals"
