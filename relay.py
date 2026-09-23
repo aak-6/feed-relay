@@ -2,7 +2,7 @@
 """Generic RSS/JSON -> Discord webhook relay. Stdlib only.
 All targets, labels, locations and webhook URLs come from one encrypted config (env FEED_CONFIG, or a local
 config.local.json that is never committed). This file contains no personal data."""
-import json, os, re, sys, time, html, hashlib, datetime as dt, urllib.request, urllib.parse, urllib.error
+import json, os, re, sys, time, html, hashlib, functools, datetime as dt, urllib.request, urllib.parse, urllib.error
 from email.utils import parsedate_to_datetime
 
 def _load_cfg():
@@ -278,14 +278,26 @@ def xotelo(path, **q):
     try: return (json.loads(t) or {}).get("result") if t else None
     except Exception: return None
 
+@functools.lru_cache(maxsize=None)
+def rate_quotes(key, ci, co):
+    """One quote per hotel/date pair, shared by every program that wants the same stay."""
+    r = xotelo("rates", hotel_key=key, chk_in=ci, chk_out=co)
+    return tuple(x["rate"] for x in (r or {}).get("rates", []) if x.get("rate"))
+
 def stay_windows(n):
-    """n=1: Fri & Sat single nights; n>=2: Fri and Sun check-ins for n nights; next ~10 weeks."""
-    d, out = NOW.date() + dt.timedelta(days=2), []
-    while d < NOW.date() + dt.timedelta(days=75):
+    """n=1: Fri & Sat nights; n>=2: Fri/Sun check-ins. Looks `horizon_days` out (default 150) and
+    samples `windows` dates evenly across it, rotating the sample daily so every weekend gets priced
+    over a week of runs without raising per-run cost."""
+    horizon = int(H.get("horizon_days", 150)); k = int(H.get("windows", 16))
+    end = NOW.date() + dt.timedelta(days=horizon)
+    d, allw = NOW.date() + dt.timedelta(days=2), []
+    while d + dt.timedelta(days=n) <= end + dt.timedelta(days=1):
         if (n == 1 and d.weekday() in (4, 5)) or (n >= 2 and d.weekday() in (4, 6)):
-            out.append((d, d + dt.timedelta(days=n)))
+            allw.append((d, d + dt.timedelta(days=n)))
         d += dt.timedelta(days=1)
-    return out[:int(H.get('windows', 12))]
+    if len(allw) <= k: return allw
+    step = len(allw) / k; off = NOW.timetuple().tm_yday % max(int(step), 1)
+    return [allw[min(int(i * step) + off, len(allw) - 1)] for i in range(k)]
 
 def run_hotels():
     if not H.get("geos"): log("hotels: no config"); return
@@ -309,11 +321,11 @@ def run_hotels():
         c = [h for h in pool if inc.search(h["name"]) and not exc.search(h["name"]) and h["rating"] >= p.get("min_rating", 0)
              and h["reviews"] >= p.get("min_reviews", 0) and h["min"] <= p.get("max_list_min", 99999)]
         cands[p["id"]] = sorted(c, key=lambda h: -h["rating"])[:p.get("max_hotels", 25)]
-    jobs = [(p, h, w) for p in progs for h in cands[p["id"]] for w in stay_windows(int(p.get("nights", 1)))]
+    jobs = [(p, h, w) for p in progs for h in cands[p["id"]] for w in stay_windows(int(p.get("nights", 1)))
+            if not p.get("until") or w[1].isoformat() <= p["until"]]
     def price(job):
         p, h, (ci, co) = job
-        r = xotelo("rates", hotel_key=h["key"], chk_in=ci.isoformat(), chk_out=co.isoformat())
-        rates = [x["rate"] for x in (r or {}).get("rates", []) if x.get("rate")]
+        rates = rate_quotes(h["key"], ci.isoformat(), co.isoformat())
         if not rates: return None
         nightly = min(rates)
         if h["max"] and nightly > h["max"] * 1.5: return None          # stale/outlier quote
@@ -325,7 +337,10 @@ def run_hotels():
                 "credit": credit, "oop": max(round(total - credit), 0)}
     with ThreadPoolExecutor(max_workers=8) as ex:
         rows = [r for r in ex.map(price, jobs) if r]
-    log(f"hotels pool={len(pool)} jobs={len(jobs)} priced={len(rows)}")
+    log(f"hotels pool={len(pool)} jobs={len(jobs)} quotes={rate_quotes.cache_info().currsize} priced={len(rows)}")
+    if len(rows) < max(10, len(jobs) // 20):
+        # rate source down or throttling: don't overwrite the channel with an empty board
+        log("hotels: rate source returned almost nothing - skipping post"); sys.exit(1)
 
     embeds, free_hits = [], 0
     for p in progs:
