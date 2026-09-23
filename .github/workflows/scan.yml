@@ -1,0 +1,32 @@
+name: scan
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: scan
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: s-${{ github.run_id }}
+          restore-keys: s-
+      - name: Run
+        env:
+          FEED_CONFIG: ${{ secrets.FEED_CONFIG }}
+        run: python3 relay.py deals
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state
+          key: s-${{ github.run_id }}

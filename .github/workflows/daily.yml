@@ -1,0 +1,19 @@
+name: daily
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run
+        env:
+          FEED_CONFIG: ${{ secrets.FEED_CONFIG }}
+        run: python3 relay.py hotels
