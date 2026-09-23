@@ -285,7 +285,7 @@ def stay_windows(n):
         if (n == 1 and d.weekday() in (4, 5)) or (n >= 2 and d.weekday() in (4, 6)):
             out.append((d, d + dt.timedelta(days=n)))
         d += dt.timedelta(days=1)
-    return out[:16]
+    return out[:int(H.get('windows', 12))]
 
 def run_hotels():
     if not H.get("geos"): log("hotels: no config"); return
@@ -319,8 +319,11 @@ def run_hotels():
         if h["max"] and nightly > h["max"] * 1.5: return None          # stale/outlier quote
         n = (co - ci).days; total = round(nightly * n * tax)
         credit = total if p.get("cert") else float(p.get("credit", 0))
-        return {**h, "pid": p["id"], "ci": ci, "co": co, "n": n, "nightly": nightly, "total": total, "oop": max(round(total - credit), 0)}
-    with ThreadPoolExecutor(max_workers=6) as ex:
+        stack = bool(p.get("bonus_re") and re.search(p["bonus_re"], h["name"], re.I))
+        if stack: credit += float(p.get("bonus_credit", 0))
+        return {**h, "pid": p["id"], "ci": ci, "co": co, "n": n, "nightly": nightly, "total": total, "stack": stack,
+                "credit": credit, "oop": max(round(total - credit), 0)}
+    with ThreadPoolExecutor(max_workers=8) as ex:
         rows = [r for r in ex.map(price, jobs) if r]
     log(f"hotels pool={len(pool)} jobs={len(jobs)} priced={len(rows)}")
 
@@ -339,7 +342,8 @@ def run_hotels():
             else:
                 free_hits += r["oop"] == 0
                 tag = "🟢 **$0 out of pocket**" if r["oop"] == 0 else f"you pay **${r['oop']:,}**"
-                lines.append(f"• [{r['name'][:46]}]({r['url']}) · {r['city']} · {day} · ${r['nightly']:,.0f}/nt → ${r['total']:,} all-in · {tag} · ★{r['rating']}")
+                stk = f" · 🔗 stacks ${r['credit']:,.0f}" if r.get("stack") else ""
+                lines.append(f"• [{r['name'][:46]}]({r['url']}) · {r['city']} · {day} · ${r['nightly']:,.0f}/nt → ${r['total']:,} all-in · {tag}{stk} · ★{r['rating']}")
         e = {"title": p.get("label", p["id"]), "color": int(p.get("color", 0x3987E5)),
              "description": "\n".join(lines) or "_Nothing in range this week._", "footer": {"text": p.get("footer", "")[:2000]}}
         if top and top[0]["img"].startswith("https://"): e["thumbnail"] = {"url": top[0]["img"]}
