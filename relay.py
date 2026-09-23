@@ -40,8 +40,10 @@ def get(url, timeout=20, tries=3):
             log(f"GET fail {type(e).__name__} {urllib.parse.urlsplit(url).netloc}"); return None
 
 def post(hook, payload):
-    if DRY or not hook:
-        log("DRY/NOHOOK ->", json.dumps(payload)[:300]); return True
+    if not hook:
+        log("post skipped: no webhook configured"); return False
+    if DRY:
+        log("DRY ->", json.dumps(payload)[:300]); return True
     data = json.dumps(payload).encode()
     for i in range(6):
         try:
@@ -242,7 +244,7 @@ def run_deals():
     comp += parse_feed(get(f"https://www.reddit.com/r/{sub}/new/.rss"), f"r/{sub}")
     food = collect(FOOD_FEEDS)
     stats = {}
-    for name, items, scorer, hook, user, avatar, color in [
+    for name, items, scorer, hk, user, avatar, color in [
         ("computers", comp, comp_score, comp_hook, "Computer Deals", "1f4bb", 0x3987E5),
         ("food", food, food_score, food_hook, "Food & Grocery Promos", "1f354", 0xD95926)]:
         hits = []
@@ -258,7 +260,7 @@ def run_deals():
         sent = 0
         for it, sc in hits[:MAX_POSTS]:
             content = f"**{sc['tier']}**" if sc.get("tier") else None
-            ok = post(hook, {"username": user,
+            ok = post(hk, {"username": user,
                              "avatar_url": f"https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/{avatar}.png",
                              "content": content, "embeds": [embed_deal(it, sc, color)]})
             sent += ok; time.sleep(1.2)
