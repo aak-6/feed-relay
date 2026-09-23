@@ -335,6 +335,12 @@ def run_hotels():
         if stack: credit += float(p.get("bonus_credit", 0))
         return {**h, "pid": p["id"], "ci": ci, "co": co, "n": n, "nightly": nightly, "total": total, "stack": stack,
                 "credit": credit, "oop": max(round(total - credit), 0)}
+    # canary: if the rate source is dead, fail fast instead of burning ~15 min on empty quotes
+    probe = [(h["key"], w[0].isoformat(), w[1].isoformat()) for (p, h, w) in jobs[::max(len(jobs) // 8, 1)]][:8]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        alive = sum(1 for q in ex.map(lambda a: rate_quotes(*a), probe) if q)
+    if probe and not alive:
+        log(f"hotels: rate source returned nothing for {len(probe)} canary quotes - skipping run"); sys.exit(1)
     with ThreadPoolExecutor(max_workers=8) as ex:
         rows = [r for r in ex.map(price, jobs) if r]
     log(f"hotels pool={len(pool)} jobs={len(jobs)} quotes={rate_quotes.cache_info().currsize} priced={len(rows)}")
