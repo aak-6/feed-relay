@@ -302,8 +302,150 @@ def stay_windows(n):
     step = len(allw) / k; off = NOW.timetuple().tm_yday % max(int(step), 1)
     return [allw[min(int(i * step) + off, len(allw) - 1)] for i in range(k)]
 
+# ---- fallback rate source: Google Hotels via SerpApi (free plan 250 searches/mo) ----
+SERP_KEY = os.environ.get("SERPAPI_KEY", "")
+SERP_CACHE = "state/serp_hotels.json"
+# query types: which programs each one feeds (by nights + brand shape)
+SERP_TYPES = [("lux", 1, "luxury hotels in {c}", "4,5"), ("hyatt", 1, "Hyatt hotels in {c}", ""),
+              ("value", 2, "hotels in {c}", ""), ("lux", 2, "luxury hotels in {c}", "4,5")]
+
+def serp_search(q, ci, co, hclass):
+    prm = {"engine": "google_hotels", "q": q, "check_in_date": ci, "check_out_date": co, "adults": 2,
+           "currency": "USD", "gl": "us", "hl": "en", "sort_by": 3, "rating": 8, "api_key": SERP_KEY}
+    if hclass: prm["hotel_class"] = hclass
+    t = get("https://serpapi.com/search.json?" + urllib.parse.urlencode(prm), timeout=45, tries=2)
+    try: d = json.loads(t) if t else {}
+    except Exception: d = {}
+    if d.get("error"): log("serp: " + str(d["error"])[:80])
+    out = []
+    for p in d.get("properties") or []:
+        nightly = ((p.get("rate_per_night") or {}).get("extracted_lowest"))
+        if not nightly: continue
+        imgs = p.get("images") or []
+        out.append({"name": p.get("name", "")[:80], "rating": p.get("overall_rating") or 0, "reviews": p.get("reviews") or 0,
+                    "url": p.get("link") or "", "img": (imgs[0].get("thumbnail") if imgs else "") or "",
+                    "nightly": float(nightly), "total": (p.get("total_rate") or {}).get("extracted_lowest"),
+                    "token": p.get("property_token") or p.get("name", "")})
+    return out
+
+def serp_rows(progs, tax):
+    """Spend at most `serp_per_run` searches (default 8/day ~ 240/mo), accumulate a 7-day cache, price every program from it."""
+    os.makedirs("state", exist_ok=True)
+    try: cache = json.load(open(SERP_CACHE))
+    except Exception: cache = {}
+    today = NOW.date().isoformat(); fresh = (NOW - dt.timedelta(days=7)).isoformat()
+    cache = {k: v for k, v in cache.items() if v.get("ts", "") >= fresh and k.split("|")[2] > today}
+    combos = []
+    for city in H["geos"]:
+        for kind, n, qf, hc in SERP_TYPES:
+            for ci, co in stay_windows(n):
+                combos.append((kind, n, qf.format(c=city), hc, city, ci.isoformat(), co.isoformat()))
+    combos.sort(key=lambda c: (c[5], c[4], c[0], c[1]))
+    todo = [c for c in combos if f"{c[2]}|{c[3]}|{c[5]}|{c[6]}" not in cache]
+    budget = int(H.get("serp_per_run", 8))
+    if todo:
+        step = max(len(todo) // budget, 1); off = NOW.timetuple().tm_yday % step
+        for kind, n, q, hc, city, ci, co in [todo[(off + i * step) % len(todo)] for i in range(min(budget, len(todo)))]:
+            cache[f"{q}|{hc}|{ci}|{co}"] = {"ts": NOW.isoformat(), "city": city, "n": n, "props": serp_search(q, ci, co, hc)}
+    json.dump(cache, open(SERP_CACHE, "w"))
+    entries = []
+    for k, v in cache.items():
+        _, _, ci, co = k.split("|")
+        entries.append((v["city"], v["n"], ci, co, v["props"], "serp:"))
+    rows = match_rows(entries, progs, tax)
+    log(f"hotels serp: searches_used={min(budget, len(todo))} cached_combos={len(cache)} rows={len(rows)}")
+    return rows
+
+def match_rows(entries, progs, tax):
+    """entries: (city, nights, check_in, check_out, [props], key_prefix) -> one row per (property, program, window)."""
+    rows = []
+    for city, nights, ci, co, props, pre in entries:
+        ci_d, co_d = dt.date.fromisoformat(ci), dt.date.fromisoformat(co)
+        v = {"n": nights, "city": city}
+        for h in props:
+            for p in progs:
+                if int(p.get("nights", 1)) != v["n"] or (p.get("until") and co > p["until"]): continue
+                if not re.search(p.get("match_re") or ".", h["name"], re.I): continue
+                if p.get("exclude_re") and re.search(p["exclude_re"], h["name"], re.I): continue
+                if h["rating"] < p.get("min_rating", 0): continue
+                total = round(h["total"]) if h.get("total") else round(h["nightly"] * v["n"] * tax)
+                credit = total if p.get("cert") else float(p.get("credit", 0))
+                stack = bool(p.get("bonus_re") and re.search(p["bonus_re"], h["name"], re.I))
+                if stack: credit += float(p.get("bonus_credit", 0))
+                rows.append({**h, "key": pre + str(h["token"]), "city": v["city"], "pid": p["id"], "ci": ci_d, "co": co_d,
+                             "n": v["n"], "total": total, "stack": stack, "credit": credit, "oop": max(round(total - credit), 0)})
+    return rows
+
+# ---- primary rate source: Blue Pillow B2A (live multi-OTA quotes; anonymous key, 120 req/min, 60k/day) ----
+BP = "https://api.b2a.bluepillow.com/v1/"
+def bp_call(path, body, key=None):
+    import uuid
+    hdr = {"Content-Type": "application/json", "User-Agent": UA, "Idempotency-Key": str(uuid.uuid4())}
+    if key: hdr["Authorization"] = "Bearer " + key
+    for i in range(3):
+        try:
+            req = urllib.request.Request(BP + path, data=json.dumps(body).encode(), headers=hdr, method="POST")
+            with urllib.request.urlopen(req, timeout=60) as r: return json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and i < 2: time.sleep(5 * (i + 1)); continue
+            log(f"bp {path} HTTP {e.code}"); return {}
+        except Exception as e:
+            if i < 2: time.sleep(3); continue
+            log(f"bp {path} {type(e).__name__}"); return {}
+
+def bp_rows(progs, tax):
+    geos = H.get("bp_geos") or {}
+    if not geos: return []
+    key = os.environ.get("BLUEPILLOW_KEY") or (bp_call("keys", {"label": "feed-relay"}) or {}).get("key")
+    if not key: log("bp: no key"); return []
+    k = int(H.get("bp_windows", 10)); combos = []
+    for n in sorted({int(p.get("nights", 1)) for p in progs}):
+        ws = stay_windows(n)
+        if len(ws) > k: ws = [ws[int(i * len(ws) / k)] for i in range(k)]
+        for city, (lat, lon, rad) in geos.items():
+            for w in ws:
+                combos.append((city, n, w[0].isoformat(), w[1].isoformat(), lat, lon, rad, "price_asc"))
+    def one(c):
+        city, n, ci, co, lat, lon, rad, sort = c
+        body = {"location": {"type": "coordinates", "value": {"lat": lat, "lon": lon, "radius_km": rad}},
+                "dates": {"check_in": ci, "check_out": co}, "guests": {"adults": 2}, "currency": "USD",
+                "user_country": "US", "sort": sort, "page": {"limit": 100},
+                "availability_mode": "include_unavailable"}   # server-side strict/min_rating filters drop nearly everything
+        props = []
+        for r in (bp_call("search/stays", body, key) or {}).get("results") or []:
+            pr = r.get("price") or {}
+            if r.get("availability_status") != "available" or not pr.get("amount_per_night"): continue
+            if (r.get("rating") or 0) < float(H.get("bp_min_rating", 3.8)): continue
+            if (r.get("property_type") or "hotel") not in ("hotel", "bb", "resort"): continue      # no apartments/hostels/rentals
+            if re.search(r"\b(suite|room|studio|apartment|condo) (above|in|near)\b", r.get("name") or "", re.I): continue
+            props.append({"name": (r.get("name") or "")[:80], "rating": r.get("rating") or 0, "reviews": r.get("rating_count") or 0,
+                          "url": r.get("web_url") or "", "img": r.get("thumbnail_url") or "", "nightly": float(pr["amount_per_night"]),
+                          "total": None, "token": r.get("cluster_id") or r.get("id")})
+        return (city, n, ci, co, props, "bp:")
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=int(H.get("bp_threads", 6))) as ex:
+        entries = list(ex.map(one, combos))
+    got = sum(1 for e in entries if e[4])
+    log(f"hotels bp: searches={len(combos)} with_results={got} props={sum(len(e[4]) for e in entries)}")
+    return match_rows(entries, progs, tax) if got else []
+
 def run_hotels():
+    """Blue Pillow (live multi-OTA) first; programs it can't fill (luxury FHR/Edit lists) fall back to Xotelo, then SerpApi."""
     if not H.get("geos"): log("hotels: no config"); return
+    tax = float(H.get("tax") or 1.15); progs = H.get("programs") or []
+    rows = bp_rows(progs, tax)
+    have = {}
+    for r in rows: have[r["pid"]] = have.get(r["pid"], 0) + 1
+    missing = [p for p in progs if have.get(p["id"], 0) < int(H.get("min_rows", 3))]
+    if missing:
+        log("hotels: filling " + ",".join(p["id"] for p in missing) + " from fallback sources")
+        rows += xotelo_rows(missing, tax)
+    if len(rows) < 5:
+        # every source down: don't overwrite the channel with an empty board
+        log("hotels: no usable prices from any source - skipping post"); sys.exit(1)
+    post_hotels(rows, progs)
+
+def xotelo_rows(progs, tax):
     from concurrent.futures import ThreadPoolExecutor
     pool, seen = [], set()
     for g in H["geos"].values():
@@ -316,8 +458,6 @@ def run_hotels():
                              "reviews": rv.get("count") or 0, "min": pr.get("minimum") or 9999, "max": pr.get("maximum") or 0,
                              "url": h.get("url"), "img": h.get("image") or ""})
             time.sleep(1)
-    tax = float(H.get("tax") or 1.15)
-    progs = H.get("programs") or []
     cands = {}
     for p in progs:
         inc = re.compile(p.get("match_re") or ".", re.I); exc = re.compile(p.get("exclude_re") or r"(?!x)x", re.I)
@@ -343,15 +483,18 @@ def run_hotels():
     probe = [(h["key"], w[0].isoformat(), w[1].isoformat()) for (p, h, w) in jobs[::max(len(jobs) // 8, 1)]][:8]
     with ThreadPoolExecutor(max_workers=8) as ex:
         alive = sum(1 for q in ex.map(lambda a: rate_quotes(*a), probe) if q)
-    if probe and not alive:
-        log(f"hotels: rate source returned nothing for {len(probe)} canary quotes - skipping run"); sys.exit(1)
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        rows = [r for r in ex.map(price, jobs) if r]
-    log(f"hotels pool={len(pool)} jobs={len(jobs)} quotes={rate_quotes.cache_info().currsize} priced={len(rows)}")
-    if len(rows) < max(10, len(jobs) // 20):
-        # rate source down or throttling: don't overwrite the channel with an empty board
-        log("hotels: rate source returned almost nothing - skipping post"); sys.exit(1)
+    rows = []
+    if alive and jobs:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            rows = [r for r in ex.map(price, jobs) if r]
+        log(f"hotels pool={len(pool)} jobs={len(jobs)} quotes={rate_quotes.cache_info().currsize} priced={len(rows)}")
+    else:
+        log(f"hotels: primary source returned nothing for {len(probe)} canary quotes")
+    if len(rows) < max(3, len(jobs) // 20) and SERP_KEY:
+        rows = serp_rows(progs, tax)                                      # last-resort source
+    return rows
 
+def post_hotels(rows, progs):
     embeds, free_hits = [], 0
     for p in progs:
         per = {}
