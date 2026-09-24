@@ -279,7 +279,7 @@ def xotelo(path, **q):
     except Exception: return None
 
 def short_url(h):
-    return f"https://www.tripadvisor.com/Hotel_Review-{h['key']}-Reviews.html" if re.match(r"^g\d+-d\d+$", h["key"]) else h["url"]
+    return f"https://www.tripadvisor.com/Hotel_Review-{h['key']}-Reviews.html" if re.match(r"^g\d+-d\d+$", h.get("key", "")) else h["url"]
 
 @functools.lru_cache(maxsize=None)
 def rate_quotes(key, ci, co):
@@ -378,6 +378,8 @@ def match_rows(entries, progs, tax):
                              "n": v["n"], "total": total, "stack": stack, "credit": credit, "oop": max(round(total - credit), 0)})
     return rows
 
+BP_ENTRIES = []
+
 # ---- primary rate source: Blue Pillow B2A (live multi-OTA quotes; anonymous key, 120 req/min, 60k/day) ----
 BP = "https://api.b2a.bluepillow.com/v1/"
 def bp_call(path, body, key=None):
@@ -394,6 +396,11 @@ def bp_call(path, body, key=None):
         except Exception as e:
             if i < 2: time.sleep(3); continue
             log(f"bp {path} {type(e).__name__}"); return {}
+
+def bp_link(u, ci, co):
+    """Trim Blue Pillow's tracking-heavy link to the property page with dates (keeps Discord posts short)."""
+    m = re.match(r"(https://www\.bluepillow\.com/search/[0-9a-f]+)", u)
+    return f"{m.group(1)}?begin={ci}&end={co}&adults=2&currency=USD" if m else u
 
 def bp_rows(progs, tax):
     geos = H.get("bp_geos") or {}
@@ -421,12 +428,13 @@ def bp_rows(progs, tax):
             if (r.get("property_type") or "hotel") not in ("hotel", "bb", "resort"): continue      # no apartments/hostels/rentals
             if re.search(r"\b(suite|room|studio|apartment|condo) (above|in|near)\b", r.get("name") or "", re.I): continue
             props.append({"name": (r.get("name") or "")[:80], "rating": r.get("rating") or 0, "reviews": r.get("rating_count") or 0,
-                          "url": r.get("web_url") or "", "img": r.get("thumbnail_url") or "", "nightly": float(pr["amount_per_night"]),
+                          "url": bp_link(r.get("web_url") or "", ci, co), "img": r.get("thumbnail_url") or "", "nightly": float(pr["amount_per_night"]),
                           "total": None, "token": r.get("cluster_id") or r.get("id")})
         return (city, n, ci, co, props, "bp:")
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=int(H.get("bp_threads", 6))) as ex:
         entries = list(ex.map(one, combos))
+    BP_ENTRIES[:] = entries
     got = sum(1 for e in entries if e[4])
     log(f"hotels bp: searches={len(combos)} with_results={got} props={sum(len(e[4]) for e in entries)}")
     return match_rows(entries, progs, tax) if got else []
@@ -438,7 +446,9 @@ def run_hotels():
     tax = float(H.get("tax") or 1.15); progs = H.get("programs") or []
     rows = bp_rows(progs, tax)
     have = {}
-    for r in rows: have[r["pid"]] = have.get(r["pid"], 0) + 1
+    cap = H.get("max_oop", 150); certs = {p["id"] for p in progs if p.get("cert")}
+    for r in rows:
+        if r["pid"] in certs or r["oop"] <= cap: have[r["pid"]] = have.get(r["pid"], 0) + 1
     missing = [p for p in progs if have.get(p["id"], 0) < int(H.get("min_rows", 3))]
     if missing:
         log("hotels: filling " + ",".join(p["id"] for p in missing) + " from fallback sources")
@@ -497,11 +507,40 @@ def xotelo_rows(progs, tax):
         rows = serp_rows(progs, tax)                                      # last-resort source
     return rows
 
+def status_embed():
+    """Best-value cash stays at the chains where Six holds elite status (book direct so perks + points apply)."""
+    elite = H.get("elite") or []
+    if not elite or not BP_ENTRIES: return None
+    tax = float(H.get("tax") or 1.15); best = {}
+    for city, n, ci, co, props, pre in BP_ENTRIES:
+        if n != int(H.get("status_nights", 2)): continue
+        for h in props:
+            if H.get("status_exclude") and re.search(H["status_exclude"], h["name"], re.I): continue   # economy brands: no real perks
+            tier = next((e for e in elite if re.search(e["re"], h["name"], re.I)), None)
+            if not tier or h["rating"] < 4: continue
+            total = round(h["nightly"] * n * tax)
+            score = (total - tier.get("value", 0) * n - float(H.get("city_bonus", {}).get(city, 0))
+                     - max(h["rating"] - 4, 0) * float(H.get("status_quality", 35)) * n)   # bang for the buck, not just cheap
+            k = h["token"]
+            if k not in best or score < best[k]["score"]:
+                best[k] = {**h, "city": city, "ci": dt.date.fromisoformat(ci), "co": dt.date.fromisoformat(co),
+                           "n": n, "total": total, "score": score, "tier": tier}
+    top = sorted(best.values(), key=lambda r: r["score"])[:int(H.get("status_rows", 8))]
+    if not top: return None
+    lines = []
+    for r in top:
+        day = f"{r['ci']:%a %b %-d}→{r['co']:%a %-d}"
+        lines.append(f"• [{r['name'][:46]}]({short_url(r)}) · {r['city']} · {day} · ${r['nightly']:,.0f}/nt → ${r['total']:,} all-in · "
+                     f"🏅 {r['tier']['tier']}: {r['tier']['perk']} · ★{r['rating']}")
+    return {"title": H.get("status_title", "🏅 Status value — pay cash, book direct"), "color": 0xC98500,
+            "description": "\n".join(lines), "footer": {"text": H.get("status_footer", "")[:2000]}}
+
 def post_hotels(rows, progs):
     embeds, free_hits = [], 0
     for p in progs:
         per = {}
-        keyf = (lambda r: -r["total"]) if p.get("cert") else (lambda r: (r["oop"], -r["rating"]))
+        pref = lambda r: float(H.get("city_bonus", {}).get(r["city"], 0))
+        keyf = (lambda r: -(r["total"] + pref(r))) if p.get("cert") else (lambda r: (r["oop"] - pref(r), -r["rating"]))
         for r in rows:
             if r["pid"] == p["id"] and (r["key"] not in per or keyf(r) < keyf(per[r["key"]])): per[r["key"]] = r
         cap = p.get("max_oop", H.get("max_oop", 150))
@@ -520,6 +559,8 @@ def post_hotels(rows, progs):
              "description": "\n".join(lines) or f"_Nothing under ${H.get('max_oop', 150)} out of pocket in the next {H.get('horizon_days', 150)} days._", "footer": {"text": p.get("footer", "")[:2000]}}
         if top and top[0]["img"].startswith("https://"): e["thumbnail"] = {"url": top[0]["img"]}
         embeds.append(e)
+    st = status_embed()
+    if st: embeds.append(st)
     head = f"🟢 **{free_hits} zero-spend** · 💵 best stays ≤ ${H.get('max_oop', 150)} out of pocket — {NOW:%a %b %-d} (DC · VA · MD, next ~5 months)"
     if H.get("note"): head += "\n_" + H["note"] + "_"
     # Discord caps a message at 6,000 embed chars / 10 embeds -> pack embeds into as few messages as fit
