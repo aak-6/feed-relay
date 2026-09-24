@@ -307,7 +307,7 @@ SERP_KEY = os.environ.get("SERPAPI_KEY", "")
 SERP_CACHE = "state/serp_hotels.json"
 # query types: which programs each one feeds (by nights + brand shape)
 SERP_TYPES = [("lux", 1, "luxury hotels in {c}", "4,5"), ("hyatt", 1, "Hyatt hotels in {c}", ""),
-              ("value", 2, "hotels in {c}", ""), ("lux", 2, "luxury hotels in {c}", "4,5")]
+              ("value", 2, "hotels in {c}", ""), ("lux", 2, "luxury hotels in {c}", "4,5"), ("value", 1, "hotels in {c}", "")]
 
 def serp_search(q, ci, co, hclass):
     prm = {"engine": "google_hotels", "q": q, "check_in_date": ci, "check_out_date": co, "adults": 2,
@@ -335,9 +335,11 @@ def serp_rows(progs, tax):
     except Exception: cache = {}
     today = NOW.date().isoformat(); fresh = (NOW - dt.timedelta(days=7)).isoformat()
     cache = {k: v for k, v in cache.items() if v.get("ts", "") >= fresh and k.split("|")[2] > today}
+    want = {(p.get("serp_kind", "value"), int(p.get("nights", 1))) for p in progs}   # only search what the thin programs need
     combos = []
     for city in H["geos"]:
         for kind, n, qf, hc in SERP_TYPES:
+            if (kind, n) not in want: continue
             for ci, co in stay_windows(n):
                 combos.append((kind, n, qf.format(c=city), hc, city, ci.isoformat(), co.isoformat()))
     combos.sort(key=lambda c: (c[5], c[4], c[0], c[1]))
@@ -432,6 +434,7 @@ def bp_rows(progs, tax):
 def run_hotels():
     """Blue Pillow (live multi-OTA) first; programs it can't fill (luxury FHR/Edit lists) fall back to Xotelo, then SerpApi."""
     if not H.get("geos"): log("hotels: no config"); return
+    os.makedirs("state", exist_ok=True)                                 # cache dir for the workflow's actions/cache
     tax = float(H.get("tax") or 1.15); progs = H.get("programs") or []
     rows = bp_rows(progs, tax)
     have = {}
