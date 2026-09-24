@@ -278,6 +278,9 @@ def xotelo(path, **q):
     try: return (json.loads(t) or {}).get("result") if t else None
     except Exception: return None
 
+def short_url(h):
+    return f"https://www.tripadvisor.com/Hotel_Review-{h['key']}-Reviews.html" if re.match(r"^g\d+-d\d+$", h["key"]) else h["url"]
+
 @functools.lru_cache(maxsize=None)
 def rate_quotes(key, ci, co):
     """One quote per hotel/date pair, shared by every program that wants the same stay."""
@@ -320,7 +323,8 @@ def run_hotels():
         inc = re.compile(p.get("match_re") or ".", re.I); exc = re.compile(p.get("exclude_re") or r"(?!x)x", re.I)
         c = [h for h in pool if inc.search(h["name"]) and not exc.search(h["name"]) and h["rating"] >= p.get("min_rating", 0)
              and h["reviews"] >= p.get("min_reviews", 0) and h["min"] <= p.get("max_list_min", 99999)]
-        cands[p["id"]] = sorted(c, key=lambda h: -h["rating"])[:p.get("max_hotels", 25)]
+        key = (lambda h: -h["max"]) if p.get("cert") else (lambda h: (h["min"], -h["rating"]))
+        cands[p["id"]] = sorted(c, key=key)[:p.get("max_hotels", 25)]
     jobs = [(p, h, w) for p in progs for h in cands[p["id"]] for w in stay_windows(int(p.get("nights", 1)))
             if not p.get("until") or w[1].isoformat() <= p["until"]]
     def price(job):
@@ -354,22 +358,23 @@ def run_hotels():
         keyf = (lambda r: -r["total"]) if p.get("cert") else (lambda r: (r["oop"], -r["rating"]))
         for r in rows:
             if r["pid"] == p["id"] and (r["key"] not in per or keyf(r) < keyf(per[r["key"]])): per[r["key"]] = r
-        top = sorted(per.values(), key=keyf)[:6]
+        cap = p.get("max_oop", H.get("max_oop", 150))
+        top = sorted([r for r in per.values() if p.get("cert") or r["oop"] <= cap], key=keyf)[:6]
         lines = []
         for r in top:
             day = f"{r['ci']:%a %b %-d}" + (f"→{r['co']:%a %-d}" if r["n"] > 1 else "")
             if p.get("cert"):
-                lines.append(f"• [{r['name'][:46]}]({r['url']}) · {r['city']} · {day} · saves **${r['total']:,}** · 🟢 $0")
+                lines.append(f"• [{r['name'][:46]}]({short_url(r)}) · {r['city']} · {day} · saves **${r['total']:,}** · 🟢 $0")
             else:
                 free_hits += r["oop"] == 0
                 tag = "🟢 **$0 out of pocket**" if r["oop"] == 0 else f"you pay **${r['oop']:,}**"
                 stk = f" · 🔗 stacks ${r['credit']:,.0f}" if r.get("stack") else ""
-                lines.append(f"• [{r['name'][:46]}]({r['url']}) · {r['city']} · {day} · ${r['nightly']:,.0f}/nt → ${r['total']:,} all-in · {tag}{stk} · ★{r['rating']}")
+                lines.append(f"• [{r['name'][:46]}]({short_url(r)}) · {r['city']} · {day} · ${r['nightly']:,.0f}/nt → ${r['total']:,} all-in · {tag}{stk} · ★{r['rating']}")
         e = {"title": p.get("label", p["id"]), "color": int(p.get("color", 0x3987E5)),
-             "description": "\n".join(lines) or "_Nothing in range this week._", "footer": {"text": p.get("footer", "")[:2000]}}
+             "description": "\n".join(lines) or f"_Nothing under ${H.get('max_oop', 150)} out of pocket in the next {H.get('horizon_days', 150)} days._", "footer": {"text": p.get("footer", "")[:2000]}}
         if top and top[0]["img"].startswith("https://"): e["thumbnail"] = {"url": top[0]["img"]}
         embeds.append(e)
-    head = (f"🟢 **{free_hits} zero-spend stay(s)** — {NOW:%a %b %-d}" if free_hits else f"{NOW:%a %b %-d} — no $0 stays today; closest options below")
+    head = f"🟢 **{free_hits} zero-spend** · 💵 best stays ≤ ${H.get('max_oop', 150)} out of pocket — {NOW:%a %b %-d} (DC · VA · MD, next ~5 months)"
     if H.get("note"): head += "\n_" + H["note"] + "_"
     # Discord caps a message at 6,000 embed chars / 10 embeds -> pack embeds into as few messages as fit
     def esize(e): return len(e["title"]) + len(e["description"]) + len(e["footer"]["text"])
