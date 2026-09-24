@@ -311,7 +311,8 @@ SERP_TYPES = [("lux", 1, "luxury hotels in {c}", "4,5"), ("hyatt", 1, "Hyatt hot
 
 def serp_search(q, ci, co, hclass):
     prm = {"engine": "google_hotels", "q": q, "check_in_date": ci, "check_out_date": co, "adults": 2,
-           "currency": "USD", "gl": "us", "hl": "en", "sort_by": 3, "rating": 8, "api_key": SERP_KEY}
+           "currency": "USD", "gl": "us", "hl": "en", "sort_by": 8 if hclass else 3, "rating": 8, "api_key": SERP_KEY}
+    # luxury searches sort by guest rating (cheapest-first buries FHR/Edit-grade hotels); value searches cheapest-first
     if hclass: prm["hotel_class"] = hclass
     t = get("https://serpapi.com/search.json?" + urllib.parse.urlencode(prm), timeout=45, tries=2)
     try: d = json.loads(t) if t else {}
@@ -324,7 +325,7 @@ def serp_search(q, ci, co, hclass):
         imgs = p.get("images") or []
         out.append({"name": p.get("name", "")[:80], "rating": p.get("overall_rating") or 0, "reviews": p.get("reviews") or 0,
                     "url": p.get("link") or "", "img": (imgs[0].get("thumbnail") if imgs else "") or "",
-                    "nightly": float(nightly), "total": (p.get("total_rate") or {}).get("extracted_lowest"),
+                    "nightly": float(nightly), "total": None,   # Google's total_rate is pre-tax -> tax factor applied downstream
                     "token": p.get("property_token") or p.get("name", "")})
     return out
 
@@ -346,8 +347,12 @@ def serp_rows(progs, tax):
     todo = [c for c in combos if f"{c[2]}|{c[3]}|{c[5]}|{c[6]}" not in cache]
     budget = int(H.get("serp_per_run", 8))
     if todo:
-        step = max(len(todo) // budget, 1); off = NOW.timetuple().tm_yday % step
-        for kind, n, q, hc, city, ci, co in [todo[(off + i * step) % len(todo)] for i in range(min(budget, len(todo)))]:
+        import random
+        rnd = random.Random(NOW.timetuple().tm_yday); rnd.shuffle(todo)     # rotate dates + cities day to day
+        pri = set(H.get("serp_priority") or [])                             # e.g. DC gets half of each day's searches
+        first = [c for c in todo if c[4] in pri][:budget // 2] if pri else []
+        pick = first + [c for c in todo if c not in first][:budget - len(first)]
+        for kind, n, q, hc, city, ci, co in pick:
             cache[f"{q}|{hc}|{ci}|{co}"] = {"ts": NOW.isoformat(), "city": city, "n": n, "props": serp_search(q, ci, co, hc)}
     json.dump(cache, open(SERP_CACHE, "w"))
     entries = []
@@ -507,34 +512,6 @@ def xotelo_rows(progs, tax):
         rows = serp_rows(progs, tax)                                      # last-resort source
     return rows
 
-def status_embed():
-    """Best-value cash stays at the chains where Six holds elite status (book direct so perks + points apply)."""
-    elite = H.get("elite") or []
-    if not elite or not BP_ENTRIES: return None
-    tax = float(H.get("tax") or 1.15); best = {}
-    for city, n, ci, co, props, pre in BP_ENTRIES:
-        if n != int(H.get("status_nights", 2)): continue
-        for h in props:
-            if H.get("status_exclude") and re.search(H["status_exclude"], h["name"], re.I): continue   # economy brands: no real perks
-            tier = next((e for e in elite if re.search(e["re"], h["name"], re.I)), None)
-            if not tier or h["rating"] < 4: continue
-            total = round(h["nightly"] * n * tax)
-            score = (total - tier.get("value", 0) * n - float(H.get("city_bonus", {}).get(city, 0))
-                     - max(h["rating"] - 4, 0) * float(H.get("status_quality", 35)) * n)   # bang for the buck, not just cheap
-            k = h["token"]
-            if k not in best or score < best[k]["score"]:
-                best[k] = {**h, "city": city, "ci": dt.date.fromisoformat(ci), "co": dt.date.fromisoformat(co),
-                           "n": n, "total": total, "score": score, "tier": tier}
-    top = sorted(best.values(), key=lambda r: r["score"])[:int(H.get("status_rows", 8))]
-    if not top: return None
-    lines = []
-    for r in top:
-        day = f"{r['ci']:%a %b %-d}→{r['co']:%a %-d}"
-        lines.append(f"• [{r['name'][:46]}]({short_url(r)}) · {r['city']} · {day} · ${r['nightly']:,.0f}/nt → ${r['total']:,} all-in · "
-                     f"🏅 {r['tier']['tier']}: {r['tier']['perk']} · ★{r['rating']}")
-    return {"title": H.get("status_title", "🏅 Status value — pay cash, book direct"), "color": 0xC98500,
-            "description": "\n".join(lines), "footer": {"text": H.get("status_footer", "")[:2000]}}
-
 def post_hotels(rows, progs):
     embeds, free_hits = [], 0
     for p in progs:
@@ -559,8 +536,6 @@ def post_hotels(rows, progs):
              "description": "\n".join(lines) or f"_Nothing under ${H.get('max_oop', 150)} out of pocket in the next {H.get('horizon_days', 150)} days._", "footer": {"text": p.get("footer", "")[:2000]}}
         if top and top[0]["img"].startswith("https://"): e["thumbnail"] = {"url": top[0]["img"]}
         embeds.append(e)
-    st = status_embed()
-    if st: embeds.append(st)
     head = f"🟢 **{free_hits} zero-spend** · 💵 best stays ≤ ${H.get('max_oop', 150)} out of pocket — {NOW:%a %b %-d} (DC · VA · MD, next ~5 months)"
     if H.get("note"): head += "\n_" + H["note"] + "_"
     # Discord caps a message at 6,000 embed chars / 10 embeds -> pack embeds into as few messages as fit
