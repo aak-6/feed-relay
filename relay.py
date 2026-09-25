@@ -190,22 +190,6 @@ def store_of(it):
     m = re.search(r"\b(?:at|@|from)\s+(Amazon|Best ?Buy|Walmart|Newegg|B&H|Costco|Target|Micro Center|Adorama|Dell|HP|Lenovo|Apple|Woot|eBay|Antonline)\b", it["title"], re.I)
     return m.group(1) if m else None
 
-# ---------------- food / grocery ----------------
-_F = CFG.get("food") or {}
-FOOD_BRANDS = _F.get("brands") or ["doordash", "dashpass", "grubhub", "uber eats", "ubereats", "uber one", "instacart", "gopuff"]
-FOOD_FEEDS = [("Slickdeals", sd(q)) for q in (_F.get("queries") or ["doordash", "grubhub", "uber eats", "instacart"])]
-FOOD_BRAND_RE = re.compile("|".join(re.escape(b).replace(r"\ ", r"\s?") for b in FOOD_BRANDS), re.I)
-FOOD_PROMO = re.compile(r"\boff\b|free|promo|code|credit|%|back|bogo|\bdeal\b|coupon|membership|trial|\$\d", re.I)
-FOOD_NOT = re.compile(r"365 by|\[sns\]|subscribe ?& ?save|airpods|iphone|nintendo|switch|playstation|xbox|gift ?cards?,|lego", re.I)
-
-def food_score(it):
-    t = it["title"]
-    if BLOCK.search(t) or FOOD_NOT.search(t): return None
-    b = FOOD_BRAND_RE.search(t)
-    if not b or not FOOD_PROMO.search(t): return None
-    ymmv = bool(re.search(r"ymmv|targeted|select (accounts|users)|new (customers|users)|first order", t + " " + it["desc"], re.I))
-    return {"brand": b.group(0), "ymmv": ymmv}
-
 # ---------------- runner ----------------
 def collect(feeds):
     items = []
@@ -238,18 +222,16 @@ def embed_deal(it, sc, color):
 
 def run_deals():
     s = load_state(); first = not s["seen"]
-    comp_hook = hook("computers"); food_hook = hook("food")
+    comp_hook = hook("computers")
     comp = collect(COMP_FEEDS)
     sub = REDDIT[s.get("rr", 0) % len(REDDIT)]; s["rr"] = s.get("rr", 0) + 1   # reddit rate-limits per host: one per run
     comp += parse_feed(get(f"https://www.reddit.com/r/{sub}/new/.rss"), f"r/{sub}")
-    food = collect(FOOD_FEEDS)
     stats = {}
     for name, items, scorer, hk, user, avatar, color in [
-        ("computers", comp, comp_score, comp_hook, "Computer Deals", "1f4bb", 0x3987E5),
-        ("food", food, food_score, food_hook, "Food & Grocery Promos", "1f354", 0xD95926)]:
+        ("computers", comp, comp_score, comp_hook, "Computer Deals", "1f4bb", 0x3987E5)]:
         hits = []
         for it in items:
-            if not it["title"] or not fresh(it, 96 if name == "food" else MAX_AGE_H): continue
+            if not it["title"] or not fresh(it, MAX_AGE_H): continue
             k = key(it)
             if k in s["seen"]: continue
             sc = scorer(it)
