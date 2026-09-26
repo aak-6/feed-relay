@@ -208,7 +208,7 @@ def ebay_json(tok, url):
         log(f"ebay fail {type(e).__name__}"); return None
 
 AUCTION_Q = HC.get("auction_q") or ["gaming laptop", "rtx laptop", "(msi, asus, razer) laptop"]
-AUCTION_WINDOW_H = float(HC.get("auction_window_h", 24))   # post an auction only once it is this close to ending
+AUCTION_WINDOW_H = float(HC.get("auction_window_h", 72))   # post an auction only once it is this close to ending
 GETITEM_CAP = int(HC.get("getitem_cap", 25))                # per run (Buy It Now); keeps us under the eBay Browse daily quota
 AUCTION_CAP = int(HC.get("auction_getitem_cap", 15))        # per run (auctions get their own budget so BIN backlog cannot starve them)
 AUCTION_POSTS = int(HC.get("auction_posts", 4))             # auction posts per run, on top of MAX_POSTS
