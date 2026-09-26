@@ -147,7 +147,8 @@ HC = CFG.get("hunter") or {}
 STUDY_MAX = float(HC.get("study_max", 215))   # delivered total
 GAME_MIN, GAME_MAX = float(HC.get("game_min", 300)), float(HC.get("game_max", 500))
 HUNT_Q = HC.get("slickdeals_q") or ["thinkpad t480", "refurbished gaming laptop", "rtx 3060 laptop",
-                                    "rtx 3050 laptop", "rtx 4050 laptop", "rtx 4060 laptop"]
+                                    "rtx 3050 laptop", "rtx 4050 laptop", "rtx 4060 laptop", "rtx 5050 laptop",
+                                    "ebay coupon", "ebay refurbished coupon"]
 COMP_FEEDS = [("Slickdeals", sd(q)) for q in HUNT_Q] + [("dealnews", "https://www.dealnews.com/c39/Computers/?rss=1")]
 REDDIT = HC.get("reddit") or ["hardwareswap", "laptopdeals", "hardwareswap", "GameDeals"]
 
@@ -177,7 +178,14 @@ def first_price(t):
 
 def comp_score(it):
     t = it["title"]; blob = t + " " + (it.get("desc") or "")
-    if BLOCK.search(t) or JUNK.search(t): return None
+    if BLOCK.search(t): return None
+    # ---- eBay tech / refurbished coupon codes (stackable on the listings this scanner finds) ----
+    if (re.search(r"\bebay\b", t, re.I) and re.search(r"coupon|promo|\bcode\b|\d+% off|\$\d+ off", t, re.I)
+            and re.search(r"refurb|tech|electronic|laptop|computer|sitewide|select|certified", t, re.I)):
+        return {"price": None, "tier": "🏷 EBAY CODE", "profile": "coupon",
+                "why": "stack on a used/refurb laptop", "notes": ["check expiry, min spend and eligible categories"],
+                "specs": "", "store": "eBay"}
+    if JUNK.search(t): return None
     if re.search(r"\[W\][^\[]*\b(?:t480|laptop|gpu|rtx)", t, re.I) and not re.search(r"\[H\][^\[]*(?:laptop|t480|rtx|notebook)", t, re.I):
         return None                                   # a WANT post, not a sale
     price = it.get("price") if it.get("price") is not None else first_price(t)
