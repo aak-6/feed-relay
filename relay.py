@@ -207,9 +207,11 @@ def ebay_json(tok, url):
     except Exception as e:
         log(f"ebay fail {type(e).__name__}"); return None
 
-AUCTION_Q = HC.get("auction_q") or ["gaming laptop", "rtx laptop", "msi OR asus OR razer laptop rtx"]
-AUCTION_WINDOW_H = float(HC.get("auction_window_h", 12))   # post an auction only once it is this close to ending
-GETITEM_CAP = int(HC.get("getitem_cap", 30))                # per run; keeps us far under the eBay Browse daily quota
+AUCTION_Q = HC.get("auction_q") or ["gaming laptop", "rtx laptop", "(msi, asus, razer) laptop"]
+AUCTION_WINDOW_H = float(HC.get("auction_window_h", 24))   # post an auction only once it is this close to ending
+GETITEM_CAP = int(HC.get("getitem_cap", 25))                # per run (Buy It Now); keeps us under the eBay Browse daily quota
+AUCTION_CAP = int(HC.get("auction_getitem_cap", 15))        # per run (auctions get their own budget so BIN backlog cannot starve them)
+AUCTION_POSTS = int(HC.get("auction_posts", 4))             # auction posts per run, on top of MAX_POSTS
 
 def ebay_search(tok, q, auction=False):
     lo = 0 if auction else int(MIN_TOTAL - 40)
@@ -251,7 +253,7 @@ def ebay_items():
     tok = ebay_token()
     if not tok: return [], None
     items, seen_ids = [], set()
-    for q, auc in [(q, False) for q in EBAY_Q] + [(q, True) for q in AUCTION_Q]:
+    for q, auc in [(q, True) for q in AUCTION_Q] + [(q, False) for q in EBAY_Q]:
         for it in ebay_search(tok, q, auc):
             if it["id"] and it["id"] not in seen_ids: seen_ids.add(it["id"]); items.append(it)
         time.sleep(0.3)
@@ -343,8 +345,8 @@ def comp_score_ebay(it, tok):
                      f", {it.get('bids', 0)} bids. Max bid ${MAX_TOTAL - ship:,.0f} to stay at ${MAX_TOTAL:,.0f} delivered")
     score = (3 if pref else 1 if durable else 0) + (2 if strong else 1) + (1 if cpu6 else 0) + \
             (1 if win11 else 0) + (1 if charger else 0) + (1 if ram and ram >= 16 else 0)
-    tier = ("🏆 TOP PICK" if score >= 8 and not it.get("auction") else
-            "🎮 STRONG" if score >= 6 else "🎮 SOLID")
+    tier = ("🏆 TOP PICK" if score >= 8 else "🎮 STRONG" if score >= 6 else "🎮 SOLID")
+    if it.get("auction"): tier += " · 🔨 AUCTION"
     spec = [f"**GPU** {g}", f"**CPU** {a.get('processor') or ('6+ core' if cpu6 else '?')}",
             f"**RAM** {int(ram)}GB" if ram else "**RAM** ?", f"**Screen** {a.get('screen size') or '?'}",
             f"**OS** {os_txt or ('Win11' if win11 else 'Win10' if win10 else '?')}",
@@ -432,7 +434,7 @@ def run_deals():
         sc = coupon_score(it)
         if sc: s["seen"][k] = NOW.timestamp(); hits.append((it, sc))
     items, tok = ebay_items()
-    checked = 0
+    checked = checked_a = 0
     for it in items:
         if not it["title"]: continue
         if it.get("auction"):
@@ -442,23 +444,30 @@ def run_deals():
         k = key(it)
         if k in s["seen"]: continue
         if not prefilter(it): s["seen"][k] = NOW.timestamp(); continue   # bids only rise, so a reject is final
-        if checked >= GETITEM_CAP: break                 # getItem budget per run; the rest wait for the next run
-        checked += 1
+        if it.get("auction"):                            # per-type getItem budgets; the rest wait for the next run
+            if checked_a >= AUCTION_CAP: continue
+            checked_a += 1
+        else:
+            if checked >= GETITEM_CAP: continue
+            checked += 1
         sc = comp_score_ebay(it, tok); time.sleep(0.2)
         s["seen"][k] = NOW.timestamp()
         if sc: hits.append((it, sc))
     hits.sort(key=lambda x: (-(x[1].get("score") or 0), x[1].get("total") or 9e9))
-    if first: hits = hits[:3]
+    auc = sorted([h for h in hits if h[0].get("auction")], key=lambda x: x[0]["ends"])   # soonest-ending first
+    bin_ = [h for h in hits if not h[0].get("auction")]
+    post_now, later = auc[:AUCTION_POSTS] + bin_[:MAX_POSTS], auc[AUCTION_POSTS:] + bin_[MAX_POSTS:]
+    if first: post_now, later = post_now[:3], []
     sent = 0
-    for it, sc in hits[:MAX_POSTS]:
+    for it, sc in post_now:
         ok = post(hk, {"username": "Laptop Hunter",
                        "avatar_url": "https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/1f4bb.png",
                        "content": ("@everyone " if sc["tier"].startswith("🏆") else "") + f"**{sc['tier']}**",
                        "allowed_mentions": {"parse": ["everyone"]}, "embeds": [embed_deal(it, sc, 0x3987E5)]})
         sent += ok; time.sleep(1.2)
-    for it, sc in hits[MAX_POSTS:]:                        # overflow: un-see so it posts next run instead of vanishing
+    for it, sc in later:                                   # overflow: un-see so it posts next run instead of vanishing
         s["seen"].pop(key(it), None)
-    stats["computers"] = {"ebay_items": len(items), "getitem": checked, "hits": len(hits), "posted": sent}
+    stats["computers"] = {"ebay_items": len(items), "getitem": checked, "getitem_auction": checked_a, "auction_hits": len(auc), "hits": len(hits), "posted": sent}
     save_state(s); log(json.dumps(stats))
 
 # ---------------- hotels ----------------
