@@ -148,7 +148,7 @@ STUDY_MAX = float(HC.get("study_max", 215))   # delivered total
 GAME_MIN, GAME_MAX = float(HC.get("game_min", 300)), float(HC.get("game_max", 500))
 HUNT_Q = HC.get("slickdeals_q") or ["thinkpad t480", "refurbished gaming laptop", "rtx 3060 laptop",
                                     "rtx 3050 laptop", "rtx 4050 laptop", "rtx 4060 laptop"]
-COMP_FEEDS = [("Slickdeals", sd(q)) for q in HUNT_Q]
+COMP_FEEDS = [("Slickdeals", sd(q)) for q in HUNT_Q] + [("dealnews", "https://www.dealnews.com/c39/Computers/?rss=1")]
 REDDIT = HC.get("reddit") or ["hardwareswap", "laptopdeals", "hardwareswap", "GameDeals"]
 
 JUNK = re.compile(r"\bparts\b|for parts|as[- ]is|not working|no (?:ssd|hdd|ram|os|battery|charger|storage)|"
