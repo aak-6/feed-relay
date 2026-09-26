@@ -135,100 +135,55 @@ def fresh(it, hours=MAX_AGE_H):
     return it["when"] is None or (NOW - it["when"]).total_seconds() < hours * 3600
 
 def key(it):
+    if it.get("id"): return "e" + hashlib.sha1(it["id"].encode()).hexdigest()[:15]
     base = re.sub(r"\W+", "", it["title"].lower())[:80]
     return hashlib.sha1(base.encode()).hexdigest()[:16]
 
-# ---------------- used-laptop hunter ----------------
-# Two watch profiles, both tuned for USED / REFURBISHED machines (replaces the old new-computer deal feed).
-#   study  : ThinkPad T480 (not T480s) with i5-8350U or 16GB, at/under a price cap
-#   gaming : used gaming laptop in a price band with a GPU/CPU that clears current MMO/FPS minimums
-# Thresholds are overridable via FEED_CONFIG["hunter"]; nothing personal lives in this file.
+# ---------------- used gaming-laptop hunter (eBay only) ----------------
+# eBay Browse API is the only listing source. Every candidate is opened with getItem so the filters run on the
+# seller's item specifics + description, not just the title. Hard rules (all overridable via FEED_CONFIG["hunter"]):
+#   delivered total <= max_total, RAM >= min_ram_gb, screen >= min_screen_in, a GPU that runs current games at
+#   low/medium (GTX 1660 Ti / RTX 2060 / RTX 3050 class or better), no 4-core H CPU, Windows OS, charger not excluded,
+#   working condition only, seller feedback >= min_feedback_pct. Nothing personal lives in this file.
 HC = CFG.get("hunter") or {}
-STUDY_MAX = float(HC.get("study_max", 215))   # delivered total
-STUDY_ON = bool(HC.get("study", False))        # T480 hunt closed (bought); set hunter.study=true to revive
-GAME_MIN, GAME_MAX = float(HC.get("game_min", 300)), float(HC.get("game_max", 500))
-HUNT_Q = HC.get("slickdeals_q") or (["thinkpad t480"] if STUDY_ON else []) + ["refurbished gaming laptop", "rtx 3060 laptop",
-                                    "rtx 3050 laptop", "rtx 4050 laptop", "rtx 4060 laptop", "rtx 5050 laptop",
-                                    "ebay coupon", "ebay refurbished coupon"]
-COMP_FEEDS = [("Slickdeals", sd(q)) for q in HUNT_Q] + [("dealnews", "https://www.dealnews.com/c39/Computers/?rss=1")]
-REDDIT = HC.get("reddit") or ["hardwareswap", "laptopdeals", "hardwareswap", "GameDeals"]
+MAX_TOTAL = float(HC.get("max_total", 500))
+MIN_TOTAL = float(HC.get("min_total", 180))          # below this is almost always parts/scam bait
+MIN_RAM = int(HC.get("min_ram_gb", 16))
+MIN_SCREEN = float(HC.get("min_screen_in", 14))
+MIN_FB = float(HC.get("min_feedback_pct", 97))
+MIN_FB_N = int(HC.get("min_feedback_n", 10))
+PREF_BRANDS = [b.lower() for b in HC.get("pref_brands", ["msi", "asus", "razer"])]
+DURABLE = re.compile(r"\b(?:msi|asus|rog|tuf|razer|legion|alienware|omen|aorus|gigabyte|predator|helios|"
+                     r"thinkpad p|zbook|precision|xps|eurocom|clevo|xmg|eluktronics)\b", re.I)
+EBAY_Q = HC.get("ebay_q") or [
+    "gaming laptop rtx 3060", "gaming laptop rtx 3070", "gaming laptop rtx 2070", "gaming laptop rtx 2060",
+    "gaming laptop rtx 3050", "gaming laptop rtx 4050", "gaming laptop rtx 4060", "gaming laptop gtx 1660 ti",
+    "msi gaming laptop", "asus rog laptop", "asus tuf gaming laptop", "razer blade", "lenovo legion laptop",
+    "alienware laptop", "hp omen laptop", "gigabyte aorus laptop", "acer predator laptop"]
+# eBay coupon codes (eBay-only promos surfaced via Slickdeals keyword RSS) - they stack on these listings
+COUPON_FEEDS = [("Slickdeals", sd(q)) for q in HC.get("coupon_q", ["ebay coupon", "ebay refurbished coupon"])]
 
-JUNK = re.compile(r"\bparts\b|for parts|as[- ]is|not working|no (?:ssd|hdd|ram|os|battery|charger|storage)|"
+JUNK = re.compile(r"\bparts\b|for parts|as[- ]is|not working|no (?:ssd|hdd|ram|os|storage)|"
                   r"\bbios (?:lock|password)|locked|cracked|broken|damaged|read desc|motherboard|\blcd\b|screen only|"
-                  r"\blot of\b|\bboard\b only|replacement|keyboard only|palmrest|\bfan\b only", re.I)
-T480 = re.compile(r"\bt480\b(?!s)", re.I)
-GOOD_GPU = re.compile(r"\b(?:gtx ?1660 ?ti|rtx ?20[678]0|rtx ?30[5-8]0(?: ?ti)?|rtx ?40[5-9]0|"
+                  r"\blot of\b|\bboard\b only|replacement|keyboard only|palmrest|\bfan\b only|\bbox only\b|"
+                  r"\bdesktop\b|\btower\b|mini ?pc|\bshell\b|housing|chassis", re.I)
+NO_CHARGER = re.compile(r"no (?:charger|power (?:adapter|supply|cord|brick)|ac adapter|adapter)|without (?:a )?"
+                        r"(?:charger|power|adapter)|charger (?:not|isn.?t) included|(?:charger|adapter) sold separately|"
+                        r"laptop only|unit only|does not (?:come with|include) (?:a )?(?:charger|power|adapter)", re.I)
+HAS_CHARGER = re.compile(r"charger|power (?:adapter|supply|brick|cord)|ac adapter|\bpsu\b|power cable", re.I)
+GOOD_GPU = re.compile(r"\b(?:gtx ?1660 ?ti|gtx ?1070|gtx ?1080|rtx ?20[678]0(?: ?super| ?max-?q)?|"
+                      r"rtx ?30[5-8]0(?: ?ti)?|rtx ?40[5-9]0|rtx ?50[5-9]0|"
                       r"rx ?(?:5600m|5700m|6[5-8]\d0m|6[5-8]\d0s|7600s|7600m))\b", re.I)
-WEAK_GPU = re.compile(r"\b(?:gtx ?1050|gtx ?1650|mx ?\d{3}|iris|uhd|vega|radeon graphics)\b", re.I)
-SIX_CORE = re.compile(r"\b(?:i[579][- ]?(?:8750|8850|9750|9850|10750|10850|10870|10875|10980)h\w*|"
+STRONG_GPU = re.compile(r"20[78]0|30[6-8]0|40[6-9]0|50[6-9]0|1080|6[6-8]\d0", re.I)
+SIX_CORE = re.compile(r"\b(?:i[579][- ]?(?:8750|8850|9750|9850|9880|10750|10850|10870|10875|10980)h\w*|"
                       r"i[579][- ]?1[1-4]\d{3}h\w*|i7[- ]?11800h|"
                       r"ryzen ?[579](?: pro)? ?[4-8]\d{3}h\w*|r[579][- ]?[4-8]\d{3}h\w*|"
                       r"core ?(?:ultra )?[579] ?\d{3}h\w*)\b", re.I)
-FOUR_CORE_H = re.compile(r"\bi5[- ]?(?:8300|9300|10300)h\b|\bryzen ?5 ?3550h\b", re.I)
-PRICE_ANY = re.compile(r"\$\s?([\d,]{2,5}(?:\.\d{2})?)")
+FOUR_CORE_H = re.compile(r"\bi5[- ]?(?:8300|9300|10300)h\b|\bryzen ?5 ?3550h\b|\bi7[- ]?7700hq\b", re.I)
 
-def first_price(t):
-    """hardwareswap titles: [H] ... [W] PayPal, $450 shipped -> take the $ after [W] if present, else first $."""
-    w = re.split(r"\[W\]", t, flags=re.I)
-    for part in ([w[1]] if len(w) > 1 else []) + [t]:
-        m = PRICE_ANY.search(part)
-        if m:
-            try: return money(m.group(1))
-            except Exception: pass
-    return None
-
-def comp_score(it):
-    t = it["title"]; blob = t + " " + (it.get("desc") or "")
-    if BLOCK.search(t): return None
-    # ---- eBay tech / refurbished coupon codes (stackable on the listings this scanner finds) ----
-    if (re.search(r"\bebay\b", t, re.I) and re.search(r"coupon|promo|\bcode\b|\d+% off|\$\d+ off", t, re.I)
-            and re.search(r"refurb|tech|electronic|laptop|computer|sitewide|select|certified", t, re.I)):
-        return {"price": None, "tier": "🏷 EBAY CODE", "profile": "coupon",
-                "why": "stack on a used/refurb laptop", "notes": ["check expiry, min spend and eligible categories"],
-                "specs": "", "store": "eBay"}
-    if JUNK.search(t): return None
-    if re.search(r"\[W\][^\[]*\b(?:t480|laptop|gpu|rtx)", t, re.I) and not re.search(r"\[H\][^\[]*(?:laptop|t480|rtx|notebook)", t, re.I):
-        return None                                   # a WANT post, not a sale
-    price = it.get("price") if it.get("price") is not None else first_price(t)
-    if price is None and it.get("desc"):
-        price = first_price(it["desc"]); body_price = price is not None
-    else: body_price = False
-    ship = it.get("ship") or 0.0
-    total = (price + ship) if price is not None else None
-    notes = ["price read from post body, verify"] if body_price else []
-    # ---- study profile ----
-    if STUDY_ON and T480.search(t):
-        good_cpu = re.search(r"8350u", blob, re.I); ram16 = re.search(r"\b(?:16|24|32|40|64) ?gb\b", blob, re.I)
-        if not (good_cpu or ram16): return None
-        if total is None or total > STUDY_MAX: return None
-        if re.search(r"\bfhd\b|1920|1080p|\bips\b", blob, re.I): notes.append("FHD mentioned")
-        else: notes.append("verify screen is 1920x1080 IPS")
-        if re.search(r"backlit", blob, re.I): notes.append("backlit")
-        tier = "🎯 T480 MATCH" if (good_cpu and ram16) else "🟢 T480 candidate"
-        return {"price": price, "ship": ship or None, "total": total, "tier": tier, "profile": "study",
-                "why": ("i5-8350U" if good_cpu else "") + (" · 16GB+" if ram16 else ""), "notes": notes,
-                "specs": specs(blob), "store": store_of(it)}
-    # ---- gaming profile ----
-    if not re.search(r"laptop|notebook|legion|nitro|victus|\btuf\b|\brog\b|zephyrus|strix|predator|helios|\bomen\b|"
-                     r"alienware|\bg1[56]\b|aorus|\bmsi\b|katana|\bgf6[35]\b|ideapad gaming|loq", t, re.I): return None
-    if re.search(r"desktop|\btower\b|\bpc\b(?! gaming laptop)", t, re.I) and not re.search(r"laptop|notebook", t, re.I): return None
-    gpu = GOOD_GPU.search(blob)
-    if not gpu: return None
-    if total is None or not (GAME_MIN <= total <= GAME_MAX): return None
-    cpu6 = SIX_CORE.search(blob)
-    if FOUR_CORE_H.search(blob): return None          # 4-core H chips miss current MMO 6-core minimum
-    if cpu6: notes.append("6+ core CPU")
-    else: notes.append("verify CPU is 6+ cores")
-    if re.search(r"\b(?:16|32) ?gb\b", blob, re.I): notes.append("16GB+")
-    elif re.search(r"\b8 ?gb\b", blob, re.I): notes.append("8GB: plan a RAM upgrade")
-    g = gpu.group(0).upper().replace("  ", " ")
-    strong = re.search(r"30[6-8]0|40[6-9]0|20[78]0|6[6-8]\d0", g)
-    tier = "🎮 STRONG" if (strong and cpu6) else "🎮 SOLID"
-    return {"price": price, "ship": ship or None, "total": total, "tier": tier, "profile": "gaming",
-            "why": g, "notes": notes, "specs": specs(blob), "store": store_of(it)}
-
-# ---- optional eBay source (official Browse API; only runs when EBAY_CLIENT_ID/SECRET are set) ----
 EBAY_ID, EBAY_SEC = os.environ.get("EBAY_CLIENT_ID"), os.environ.get("EBAY_CLIENT_SECRET")
+EBAY_H = {"X-EBAY-C-MARKETPLACE-ID": "EBAY_US", "User-Agent": UA}
+
 def ebay_token():
     import base64
     body = urllib.parse.urlencode({"grant_type": "client_credentials",
@@ -238,24 +193,30 @@ def ebay_token():
         "Authorization": "Basic " + base64.b64encode(f"{EBAY_ID}:{EBAY_SEC}".encode()).decode()})
     try:
         with urllib.request.urlopen(req, timeout=20) as r: return json.loads(r.read()).get("access_token")
+    except urllib.error.HTTPError as e:
+        log(f"ebay token fail HTTP {e.code}"); return None
     except Exception as e:
         log(f"ebay token fail {type(e).__name__}"); return None
 
-def ebay_search(tok, q, lo, hi):
-    qs = urllib.parse.urlencode({"q": q, "category_ids": "177", "limit": "100", "sort": "newlyListed",
-        "filter": f"price:[{int(lo)}..{int(hi)}],priceCurrency:USD,itemLocationCountry:US,"
-                  "conditionIds:{1000|1500|2000|2010|2020|2030|2500|3000},buyingOptions:{FIXED_PRICE|AUCTION}"})
-    req = urllib.request.Request("https://api.ebay.com/buy/browse/v1/item_summary/search?" + qs, headers={
-        "Authorization": f"Bearer {tok}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US", "User-Agent": UA})
+def ebay_json(tok, url):
+    req = urllib.request.Request(url, headers=dict(EBAY_H, Authorization=f"Bearer {tok}"))
     try:
-        with urllib.request.urlopen(req, timeout=25) as r: data = json.loads(r.read())
+        with urllib.request.urlopen(req, timeout=25) as r: return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        log(f"ebay HTTP {e.code} {url.split('?')[0][-40:]}"); return None
     except Exception as e:
-        log(f"ebay search fail {type(e).__name__}"); return []
+        log(f"ebay fail {type(e).__name__}"); return None
+
+def ebay_search(tok, q):
+    qs = urllib.parse.urlencode({"q": q, "category_ids": "177", "limit": "100", "sort": "newlyListed",
+        "filter": f"price:[{int(MIN_TOTAL - 40)}..{int(MAX_TOTAL)}],priceCurrency:USD,itemLocationCountry:US,"
+                  "conditionIds:{1000|1500|2000|2010|2020|2030|2500|3000},buyingOptions:{FIXED_PRICE|AUCTION}"})
+    data = ebay_json(tok, "https://api.ebay.com/buy/browse/v1/item_summary/search?" + qs) or {}
     out = []
     for x in data.get("itemSummaries") or []:
-        fb = (x.get("seller") or {}).get("feedbackPercentage")
+        sel = x.get("seller") or {}
         try:
-            if fb is not None and float(fb) < 97: continue          # skip weak sellers
+            if float(sel.get("feedbackPercentage") or 100) < MIN_FB or int(sel.get("feedbackScore") or 0) < MIN_FB_N: continue
         except Exception: pass
         p = float((x.get("price") or {}).get("value") or 0) or None
         sh = 0.0
@@ -266,24 +227,125 @@ def ebay_search(tok, q, lo, hi):
         try: when = dt.datetime.fromisoformat((x.get("itemCreationDate") or "").replace("Z", "+00:00"))
         except Exception: pass
         auc = "AUCTION" in (x.get("buyingOptions") or [])
-        out.append({"title": x.get("title") or "", "link": (x.get("itemWebUrl") or "").split("?")[0],
-                    "when": when, "desc": f"{x.get('condition','')} · seller {fb}% · " + ("auction" if auc else "buy it now"),
-                    "thumb": None, "img": ((x.get("image") or {}).get("imageUrl")), "source": "eBay",
-                    "price": p, "ship": sh})
+        out.append({"id": x.get("itemId"), "title": x.get("title") or "", "link": (x.get("itemWebUrl") or "").split("?")[0],
+                    "when": when, "desc": "", "thumb": None, "img": ((x.get("image") or {}).get("imageUrl")),
+                    "source": "eBay", "price": p, "ship": sh, "auction": auc, "cond": x.get("condition") or "",
+                    "seller": f"{sel.get('feedbackPercentage','?')}% ({sel.get('feedbackScore','?')})"})
     return out
 
 def ebay_items():
-    if not (EBAY_ID and EBAY_SEC): return []
+    if not (EBAY_ID and EBAY_SEC): log("ebay: no credentials"); return [], None
     tok = ebay_token()
-    if not tok: return []
-    items = []
-    for q in (["thinkpad t480 8350u", "thinkpad t480 16gb"] if STUDY_ON else []):
-        items += ebay_search(tok, q, 90, STUDY_MAX); time.sleep(0.5)
-    for q in ["gaming laptop rtx 3060", "gaming laptop rtx 3050", "gaming laptop rtx 2060",
-              "gaming laptop rtx 4050", "gaming laptop gtx 1660 ti", "gaming laptop rtx 3070"]:
-        items += ebay_search(tok, q, GAME_MIN - 40, GAME_MAX); time.sleep(0.5)
+    if not tok: return [], None
+    items, seen_ids = [], set()
+    for q in EBAY_Q:
+        for it in ebay_search(tok, q):
+            if it["id"] and it["id"] not in seen_ids: seen_ids.add(it["id"]); items.append(it)
+        time.sleep(0.3)
     log(f"ebay browse items {len(items)}")
-    return items
+    return items, tok
+
+def aspects_of(detail):
+    a = {}
+    for x in (detail or {}).get("localizedAspects") or []:
+        a[(x.get("name") or "").strip().lower()] = (x.get("value") or "").strip()
+    return a
+
+def num(s):
+    m = re.search(r"(\d+(?:\.\d+)?)", s or "")
+    return float(m.group(1)) if m else None
+
+def prefilter(it):
+    """Cheap title-only screen before spending a getItem call."""
+    t = it["title"]
+    if BLOCK.search(t) or JUNK.search(t) or NO_CHARGER.search(t): return False
+    if FOUR_CORE_H.search(t): return False
+    if not GOOD_GPU.search(t) and not DURABLE.search(t): return False
+    total = (it["price"] or 0) + (it["ship"] or 0)
+    if not (MIN_TOTAL <= total <= MAX_TOTAL): return False
+    m = re.search(r"\b(\d{1,2}) ?gb\b(?! ?(?:ssd|hdd|emmc|gddr|vram|video))", t, re.I)
+    if m and int(m.group(1)) < MIN_RAM and not re.search(r"\b(?:16|24|32|64) ?gb\b", t, re.I): return False
+    m = re.search(r"\b(1[0-3](?:\.\d)?)\s?(?:\"|in\b|inch|”)", t, re.I)
+    if m: return False                                  # sub-14" screen called out in the title
+    return True
+
+def comp_score_ebay(it, tok):
+    d = ebay_json(tok, "https://api.ebay.com/buy/browse/v1/item/" + urllib.parse.quote(it["id"], safe="|"))
+    if not d: return None
+    a = aspects_of(d)
+    desc_txt = re.sub(r"<[^>]+>", " ", html.unescape(d.get("description") or ""))
+    blob = " ".join([it["title"], d.get("shortDescription") or "", d.get("conditionDescription") or "",
+                     " ".join(f"{k}: {v}" for k, v in a.items()), desc_txt[:6000]])
+    if JUNK.search(" ".join([it["title"], d.get("conditionDescription") or ""])): return None
+    if re.search(r"\bfor parts\b|not working|as[- ]is", d.get("condition") or "", re.I): return None
+    # GPU
+    gpu = GOOD_GPU.search(" ".join([it["title"], a.get("gpu", ""), a.get("graphics processing type", ""),
+                                    a.get("graphics card", ""), d.get("shortDescription") or ""])) or GOOD_GPU.search(blob)
+    if not gpu: return None
+    # CPU
+    cpu_txt = " ".join([a.get("processor", ""), it["title"]])
+    if FOUR_CORE_H.search(cpu_txt): return None
+    cores = num(a.get("number of processor cores", ""))
+    cpu6 = bool(SIX_CORE.search(cpu_txt) or SIX_CORE.search(blob) or (cores and cores >= 6))
+    # RAM
+    ram = num(a.get("ram size", "")) or num(a.get("memory", ""))
+    if ram is None:
+        m = re.search(r"\b(8|12|16|24|32|40|48|64) ?gb\b(?! ?(?:ssd|hdd|emmc|gddr|vram|video))", it["title"], re.I)
+        ram = float(m.group(1)) if m else None
+    if ram is not None and ram < MIN_RAM: return None
+    # Screen
+    scr = num(a.get("screen size", ""))
+    if scr is not None and scr < MIN_SCREEN: return None
+    # OS
+    os_txt = a.get("operating system", "")
+    if re.search(r"not included|none|no os|linux|chrome|free ?dos|ubuntu", os_txt, re.I): return None
+    # Charger
+    ch_txt = " ".join([it["title"], d.get("conditionDescription") or "", d.get("shortDescription") or "",
+                       a.get("charger included", ""), a.get("included items", ""), desc_txt[:6000]])
+    if NO_CHARGER.search(ch_txt) or re.search(r"^no$", a.get("charger included", ""), re.I): return None
+    charger = "included" if (re.search(r"^yes", a.get("charger included", ""), re.I) or HAS_CHARGER.search(ch_txt)) else None
+    # Price
+    price = float((d.get("price") or {}).get("value") or it["price"] or 0)
+    ship = it["ship"] or 0.0
+    total = price + ship
+    if not (MIN_TOTAL <= total <= MAX_TOTAL): return None
+    brand = a.get("brand") or ""
+    series = a.get("series") or a.get("product line") or ""
+    pref = any(b in (brand + " " + it["title"]).lower() for b in PREF_BRANDS)
+    durable = pref or bool(DURABLE.search(" ".join([brand, series, it["title"]])))
+    g = gpu.group(0).upper().replace("  ", " ")
+    strong = bool(STRONG_GPU.search(g))
+    win11 = bool(re.search(r"windows ?11|win ?11", os_txt + " " + it["title"], re.I))
+    win10 = bool(re.search(r"windows ?10|win ?10", os_txt + " " + it["title"], re.I))
+    notes = []
+    if charger is None: notes.append("charger not stated: ask seller")
+    if ram is None: notes.append("RAM not stated: confirm 16GB")
+    if scr is None: notes.append("confirm screen size")
+    if not cpu6: notes.append("confirm CPU is 6+ cores")
+    if not (win11 or win10): notes.append("confirm Windows included")
+    if it.get("auction"): notes.append("AUCTION: price will rise")
+    score = (3 if pref else 1 if durable else 0) + (2 if strong else 1) + (1 if cpu6 else 0) + \
+            (1 if win11 else 0) + (1 if charger else 0) + (1 if ram and ram >= 16 else 0)
+    tier = ("🏆 TOP PICK" if score >= 8 and not it.get("auction") else
+            "🎮 STRONG" if score >= 6 else "🎮 SOLID")
+    spec = [f"**GPU** {g}", f"**CPU** {a.get('processor') or ('6+ core' if cpu6 else '?')}",
+            f"**RAM** {int(ram)}GB" if ram else "**RAM** ?", f"**Screen** {a.get('screen size') or '?'}",
+            f"**OS** {os_txt or ('Win11' if win11 else 'Win10' if win10 else '?')}",
+            f"**Brand** {brand or '?'}{(' ' + series) if series else ''}",
+            f"**Charger** {charger or 'not stated'}"]
+    it["desc"] = f"{it['cond']} · seller {it['seller']} · " + ("auction" if it.get("auction") else "buy it now")
+    return {"price": price, "ship": ship or None, "total": total, "tier": tier, "profile": "gaming", "score": score,
+            "why": g + (" · preferred brand" if pref else ""), "notes": notes, "specs": " · ".join(spec), "store": "eBay"}
+
+def coupon_score(it):
+    t = it["title"]
+    if BLOCK.search(t): return None
+    if (re.search(r"\bebay\b", t, re.I) and re.search(r"coupon|promo|\bcode\b|\d+% off|\$\d+ off", t, re.I)
+            and re.search(r"refurb|tech|electronic|laptop|computer|sitewide|select|certified", t, re.I)):
+        return {"price": None, "tier": "🏷 EBAY CODE", "profile": "coupon", "score": 99,
+                "why": "stack on a laptop below", "notes": ["check expiry, min spend and eligible categories"],
+                "specs": "", "store": "eBay"}
+    return None
 
 SPEC_PATTERNS = [
     ("CPU", r"(Apple M\d(?: Pro| Max| Ultra)?|\bM[1-6](?: Pro| Max| Ultra)?\b|Core Ultra \d \d{3}\w*|(?:Intel )?Core i[3579][- ]\d{4,5}\w*|Ryzen (?:AI )?\d(?: \w+)? \d{3,4}\w*|Snapdragon X\w* ?\w*)"),
@@ -344,32 +406,37 @@ def embed_deal(it, sc, color):
 
 def run_deals():
     s = load_state(); first = not s["seen"]
-    comp_hook = hook("computers")
-    comp = collect(COMP_FEEDS)
-    sub = REDDIT[s.get("rr", 0) % len(REDDIT)]; s["rr"] = s.get("rr", 0) + 1   # reddit rate-limits per host: one per run
-    comp += parse_feed(get(f"https://www.reddit.com/r/{sub}/new/.rss"), f"r/{sub}")
-    comp += ebay_items()
-    stats = {}
-    for name, items, scorer, hk, user, avatar, color in [
-        ("computers", comp, comp_score, comp_hook, "Laptop Hunter", "1f4bb", 0x3987E5)]:
-        hits = []
-        for it in items:
-            if not it["title"] or not fresh(it, 24 * 7 if it.get("source") == "eBay" else MAX_AGE_H): continue
-            k = key(it)
-            if k in s["seen"]: continue
-            sc = scorer(it)
-            if sc is None: continue
-            s["seen"][k] = NOW.timestamp(); hits.append((it, sc))
-        hits.sort(key=lambda x: (0 if x[1].get("tier", "").startswith(("🎯", "🎮 STRONG")) else 1, x[1].get("total") or 9e9))
-        if first: hits = hits[:3]   # seed run: prove the pipe, don't flood
-        sent = 0
-        for it, sc in hits[:MAX_POSTS]:
-            content = f"**{sc['tier']}**" if sc.get("tier") else None
-            ok = post(hk, {"username": user,
-                             "avatar_url": f"https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/{avatar}.png",
-                             "content": content, "embeds": [embed_deal(it, sc, color)]})
-            sent += ok; time.sleep(1.2)
-        stats[name] = {"scanned": len(items), "new_hits": len(hits), "posted": sent}
+    hk = hook("computers")
+    stats, hits = {}, []
+    for it in collect(COUPON_FEEDS):                       # eBay promo codes only
+        if not it["title"] or not fresh(it, MAX_AGE_H): continue
+        k = key(it)
+        if k in s["seen"]: continue
+        sc = coupon_score(it)
+        if sc: s["seen"][k] = NOW.timestamp(); hits.append((it, sc))
+    items, tok = ebay_items()
+    checked = 0
+    for it in items:
+        if not it["title"] or not fresh(it, 24 * 20): continue
+        k = key(it)
+        if k in s["seen"]: continue
+        if not prefilter(it): s["seen"][k] = NOW.timestamp(); continue
+        if checked >= 60: break                          # getItem budget per run; the rest wait for the next run
+        checked += 1
+        sc = comp_score_ebay(it, tok); time.sleep(0.2)
+        s["seen"][k] = NOW.timestamp()
+        if sc: hits.append((it, sc))
+    hits.sort(key=lambda x: (-(x[1].get("score") or 0), x[1].get("total") or 9e9))
+    if first: hits = hits[:3]
+    sent = 0
+    for it, sc in hits[:MAX_POSTS]:
+        ok = post(hk, {"username": "Laptop Hunter",
+                       "avatar_url": "https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/1f4bb.png",
+                       "content": f"**{sc['tier']}**", "embeds": [embed_deal(it, sc, 0x3987E5)]})
+        sent += ok; time.sleep(1.2)
+    for it, sc in hits[MAX_POSTS:]:                        # overflow: un-see so it posts next run instead of vanishing
+        s["seen"].pop(key(it), None)
+    stats["computers"] = {"ebay_items": len(items), "getitem": checked, "hits": len(hits), "posted": sent}
     save_state(s); log(json.dumps(stats))
 
 # ---------------- hotels ----------------
