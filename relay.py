@@ -453,7 +453,8 @@ def run_deals():
     for it, sc in hits[:MAX_POSTS]:
         ok = post(hk, {"username": "Laptop Hunter",
                        "avatar_url": "https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/1f4bb.png",
-                       "content": f"**{sc['tier']}**", "embeds": [embed_deal(it, sc, 0x3987E5)]})
+                       "content": ("@here " if sc["tier"].startswith("🏆") else "") + f"**{sc['tier']}**",
+                       "allowed_mentions": {"parse": ["everyone"]}, "embeds": [embed_deal(it, sc, 0x3987E5)]})
         sent += ok; time.sleep(1.2)
     for it, sc in hits[MAX_POSTS:]:                        # overflow: un-see so it posts next run instead of vanishing
         s["seen"].pop(key(it), None)
