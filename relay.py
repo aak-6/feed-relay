@@ -107,26 +107,6 @@ def parse_feed(xml, source):
                     "img": img.group(1) if img else None, "source": source})
     return out
 
-MONEY = r"\$\s?([\d,]+(?:\.\d{2})?)"
-def money(s): return float(s.replace(",", ""))
-
-def price_info(title, desc):
-    """Return (price, reg, pct) best-effort."""
-    text = f"{title} {desc}"
-    price = reg = pct = None
-    for m in re.finditer(MONEY + r"(\s+off)?", title):
-        if not m.group(2): price = money(m.group(1)); break
-    roundup = re.search(r"up to|from \$|sale now|deals? (right now|roundup)|best .* deals", title, re.I)
-    r = re.search(r"(?:reg\.?|list|was|orig\.?|msrp)[:\s]*" + MONEY, text, re.I)
-    if r: reg = money(r.group(1))
-    off = re.search(MONEY + r"\s+off", text, re.I)
-    if not reg and off and price: reg = price + money(off.group(1))
-    p = re.search(r"(\d{2})%\s*off", text, re.I)
-    if roundup: return price, None, None
-    if reg and price and reg > price: pct = round(100 * (1 - price / reg))
-    elif p: pct = int(p.group(1))
-    return price, reg, pct
-
 def sd(q):  # Slickdeals keyword RSS (deals forums only)
     return "https://slickdeals.net/newsearch.php?" + urllib.parse.urlencode(
         {"q": q, "searcharea": "deals", "searchin": "first", "rss": 1})
@@ -365,29 +345,6 @@ def coupon_score(it):
                 "why": "stack on a laptop below", "notes": ["check expiry, min spend and eligible categories"],
                 "specs": "", "store": "eBay"}
     return None
-
-SPEC_PATTERNS = [
-    ("CPU", r"(Apple M\d(?: Pro| Max| Ultra)?|\bM[1-6](?: Pro| Max| Ultra)?\b|Core Ultra \d \d{3}\w*|(?:Intel )?Core i[3579][- ]\d{4,5}\w*|Ryzen (?:AI )?\d(?: \w+)? \d{3,4}\w*|Snapdragon X\w* ?\w*)"),
-    ("GPU", r"((?:GeForce )?RTX ?\d{4}(?: ?Ti)?(?: SUPER)?|Radeon RX ?\d{4}\w*|Arc [AB]\d{3})"),
-    ("RAM", r"(\d{1,3}\s?GB(?= (?:DDR\d|RAM|LPDDR|unified|memory|/)|\s?RAM)|\d{1,3}GB/\d)"),
-    ("Storage", r"(\d(?:\.\d)?\s?TB(?: SSD)?|\d{3,4}\s?GB SSD|(?<=/)\d{3,4}\s?GB)"),
-    ("Screen", r"(1[0-8](?:\.\d)?(?:\"|-inch| inch|\u201d)[^,;|]{0,30}?(?:\d{3,4}p|OLED|IPS|\d{2,3}\s?Hz|QHD|FHD|4K|2\.5K|3K|Retina)?)"),
-]
-def specs(text):
-    out = []
-    for name, pat in SPEC_PATTERNS:
-        m = re.search(pat, text, re.I)
-        if m:
-            v = m.group(1).strip().rstrip("/")
-            if name == "RAM" and "/" in v: v = v.split("/")[0]
-            out.append(f"**{name}** {v}")
-    return " · ".join(out)
-
-def store_of(it):
-    m = re.search(r"^\s*([A-Z][\w&.' -]{1,40}?)\s+(?:\[[\w.]+\]\s+)?(?:has|via|is offering|offers)\b", it.get("desc") or "")
-    if m: return m.group(1).strip()
-    m = re.search(r"\b(?:at|@|from)\s+(Amazon|Best ?Buy|Walmart|Newegg|B&H|Costco|Target|Micro Center|Adorama|Dell|HP|Lenovo|Apple|Woot|eBay|Antonline)\b", it["title"], re.I)
-    return m.group(1) if m else None
 
 # ---------------- runner ----------------
 def collect(feeds):
