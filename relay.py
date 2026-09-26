@@ -145,8 +145,9 @@ def key(it):
 # Thresholds are overridable via FEED_CONFIG["hunter"]; nothing personal lives in this file.
 HC = CFG.get("hunter") or {}
 STUDY_MAX = float(HC.get("study_max", 215))   # delivered total
+STUDY_ON = bool(HC.get("study", False))        # T480 hunt closed (bought); set hunter.study=true to revive
 GAME_MIN, GAME_MAX = float(HC.get("game_min", 300)), float(HC.get("game_max", 500))
-HUNT_Q = HC.get("slickdeals_q") or ["thinkpad t480", "refurbished gaming laptop", "rtx 3060 laptop",
+HUNT_Q = HC.get("slickdeals_q") or (["thinkpad t480"] if STUDY_ON else []) + ["refurbished gaming laptop", "rtx 3060 laptop",
                                     "rtx 3050 laptop", "rtx 4050 laptop", "rtx 4060 laptop", "rtx 5050 laptop",
                                     "ebay coupon", "ebay refurbished coupon"]
 COMP_FEEDS = [("Slickdeals", sd(q)) for q in HUNT_Q] + [("dealnews", "https://www.dealnews.com/c39/Computers/?rss=1")]
@@ -196,7 +197,7 @@ def comp_score(it):
     total = (price + ship) if price is not None else None
     notes = ["price read from post body, verify"] if body_price else []
     # ---- study profile ----
-    if T480.search(t):
+    if STUDY_ON and T480.search(t):
         good_cpu = re.search(r"8350u", blob, re.I); ram16 = re.search(r"\b(?:16|24|32|40|64) ?gb\b", blob, re.I)
         if not (good_cpu or ram16): return None
         if total is None or total > STUDY_MAX: return None
@@ -276,11 +277,12 @@ def ebay_items():
     tok = ebay_token()
     if not tok: return []
     items = []
-    for q in ["thinkpad t480 8350u", "thinkpad t480 16gb"]:
+    for q in (["thinkpad t480 8350u", "thinkpad t480 16gb"] if STUDY_ON else []):
         items += ebay_search(tok, q, 90, STUDY_MAX); time.sleep(0.5)
     for q in ["gaming laptop rtx 3060", "gaming laptop rtx 3050", "gaming laptop rtx 2060",
               "gaming laptop rtx 4050", "gaming laptop gtx 1660 ti", "gaming laptop rtx 3070"]:
         items += ebay_search(tok, q, GAME_MIN - 40, GAME_MAX); time.sleep(0.5)
+    log(f"ebay browse items {len(items)}")
     return items
 
 SPEC_PATTERNS = [
