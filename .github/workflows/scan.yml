@@ -24,6 +24,8 @@ jobs:
       - name: Run
         env:
           FEED_CONFIG: ${{ secrets.FEED_CONFIG }}
+          EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
+          EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
         run: python3 relay.py deals
       - uses: actions/cache/save@v4
         if: always()
