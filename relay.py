@@ -207,10 +207,17 @@ def ebay_json(tok, url):
     except Exception as e:
         log(f"ebay fail {type(e).__name__}"); return None
 
-def ebay_search(tok, q):
-    qs = urllib.parse.urlencode({"q": q, "category_ids": "177", "limit": "100", "sort": "newlyListed",
-        "filter": f"price:[{int(MIN_TOTAL - 40)}..{int(MAX_TOTAL)}],priceCurrency:USD,itemLocationCountry:US,"
-                  "conditionIds:{1000|1500|2000|2010|2020|2030|2500|3000},buyingOptions:{FIXED_PRICE|AUCTION}"})
+AUCTION_Q = HC.get("auction_q") or ["gaming laptop", "rtx laptop", "msi OR asus OR razer laptop rtx"]
+AUCTION_WINDOW_H = float(HC.get("auction_window_h", 12))   # post an auction only once it is this close to ending
+GETITEM_CAP = int(HC.get("getitem_cap", 30))                # per run; keeps us far under the eBay Browse daily quota
+
+def ebay_search(tok, q, auction=False):
+    lo = 0 if auction else int(MIN_TOTAL - 40)
+    opt = "AUCTION" if auction else "FIXED_PRICE"
+    qs = urllib.parse.urlencode({"q": q, "category_ids": "177", "limit": "100",
+        "sort": "endingSoonest" if auction else "newlyListed",
+        "filter": f"price:[{lo}..{int(MAX_TOTAL)}],priceCurrency:USD,itemLocationCountry:US,"
+                  "conditionIds:{1000|1500|2000|2010|2020|2030|2500|3000},buyingOptions:{" + opt + "}"})
     data = ebay_json(tok, "https://api.ebay.com/buy/browse/v1/item_summary/search?" + qs) or {}
     out = []
     for x in data.get("itemSummaries") or []:
@@ -227,9 +234,15 @@ def ebay_search(tok, q):
         try: when = dt.datetime.fromisoformat((x.get("itemCreationDate") or "").replace("Z", "+00:00"))
         except Exception: pass
         auc = "AUCTION" in (x.get("buyingOptions") or [])
+        ends = None
+        try: ends = dt.datetime.fromisoformat((x.get("itemEndDate") or "").replace("Z", "+00:00"))
+        except Exception: pass
+        if auc and x.get("currentBidPrice"):
+            p = float((x.get("currentBidPrice") or {}).get("value") or p or 0)
         out.append({"id": x.get("itemId"), "title": x.get("title") or "", "link": (x.get("itemWebUrl") or "").split("?")[0],
                     "when": when, "desc": "", "thumb": None, "img": ((x.get("image") or {}).get("imageUrl")),
-                    "source": "eBay", "price": p, "ship": sh, "auction": auc, "cond": x.get("condition") or "",
+                    "source": "eBay", "price": p, "ship": sh, "auction": auc, "ends": ends, "bids": x.get("bidCount") or 0,
+                    "cond": x.get("condition") or "",
                     "seller": f"{sel.get('feedbackPercentage','?')}% ({sel.get('feedbackScore','?')})"})
     return out
 
@@ -238,8 +251,8 @@ def ebay_items():
     tok = ebay_token()
     if not tok: return [], None
     items, seen_ids = [], set()
-    for q in EBAY_Q:
-        for it in ebay_search(tok, q):
+    for q, auc in [(q, False) for q in EBAY_Q] + [(q, True) for q in AUCTION_Q]:
+        for it in ebay_search(tok, q, auc):
             if it["id"] and it["id"] not in seen_ids: seen_ids.add(it["id"]); items.append(it)
         time.sleep(0.3)
     log(f"ebay browse items {len(items)}")
@@ -262,7 +275,7 @@ def prefilter(it):
     if FOUR_CORE_H.search(t): return False
     if not GOOD_GPU.search(t) and not DURABLE.search(t): return False
     total = (it["price"] or 0) + (it["ship"] or 0)
-    if not (MIN_TOTAL <= total <= MAX_TOTAL): return False
+    if total > MAX_TOTAL or (total < MIN_TOTAL and not it.get("auction")): return False
     m = re.search(r"\b(\d{1,2}) ?gb\b(?! ?(?:ssd|hdd|emmc|gddr|vram|video))", t, re.I)
     if m and int(m.group(1)) < MIN_RAM and not re.search(r"\b(?:16|24|32|64) ?gb\b", t, re.I): return False
     m = re.search(r"\b(1[0-3](?:\.\d)?)\s?(?:\"|in\b|inch|”)", t, re.I)
@@ -307,8 +320,9 @@ def comp_score_ebay(it, tok):
     # Price
     price = float((d.get("price") or {}).get("value") or it["price"] or 0)
     ship = it["ship"] or 0.0
+    if it.get("auction"): price = it["price"] or price       # current bid, not the start price
     total = price + ship
-    if not (MIN_TOTAL <= total <= MAX_TOTAL): return None
+    if total > MAX_TOTAL or (total < MIN_TOTAL and not it.get("auction")): return None
     brand = a.get("brand") or ""
     series = a.get("series") or a.get("product line") or ""
     pref = any(b in (brand + " " + it["title"]).lower() for b in PREF_BRANDS)
@@ -323,7 +337,10 @@ def comp_score_ebay(it, tok):
     if scr is None: notes.append("confirm screen size")
     if not cpu6: notes.append("confirm CPU is 6+ cores")
     if not (win11 or win10): notes.append("confirm Windows included")
-    if it.get("auction"): notes.append("AUCTION: price will rise")
+    if it.get("auction"):
+        left = ((it["ends"] - NOW).total_seconds() / 3600) if it.get("ends") else None
+        notes.insert(0, (f"AUCTION ends in {left:.1f}h" if left is not None else "AUCTION") +
+                     f", {it.get('bids', 0)} bids. Max bid ${MAX_TOTAL - ship:,.0f} to stay at ${MAX_TOTAL:,.0f} delivered")
     score = (3 if pref else 1 if durable else 0) + (2 if strong else 1) + (1 if cpu6 else 0) + \
             (1 if win11 else 0) + (1 if charger else 0) + (1 if ram and ram >= 16 else 0)
     tier = ("🏆 TOP PICK" if score >= 8 and not it.get("auction") else
@@ -417,11 +434,15 @@ def run_deals():
     items, tok = ebay_items()
     checked = 0
     for it in items:
-        if not it["title"] or not fresh(it, 24 * 20): continue
+        if not it["title"]: continue
+        if it.get("auction"):
+            if not it.get("ends") or (it["ends"] - NOW).total_seconds() > AUCTION_WINDOW_H * 3600: continue  # not yet
+            if it["ends"] <= NOW: continue
+        elif not fresh(it, 24 * 20): continue
         k = key(it)
         if k in s["seen"]: continue
-        if not prefilter(it): s["seen"][k] = NOW.timestamp(); continue
-        if checked >= 60: break                          # getItem budget per run; the rest wait for the next run
+        if not prefilter(it): s["seen"][k] = NOW.timestamp(); continue   # bids only rise, so a reject is final
+        if checked >= GETITEM_CAP: break                 # getItem budget per run; the rest wait for the next run
         checked += 1
         sc = comp_score_ebay(it, tok); time.sleep(0.2)
         s["seen"][k] = NOW.timestamp()
